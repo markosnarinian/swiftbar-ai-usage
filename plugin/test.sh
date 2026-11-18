@@ -38,6 +38,10 @@ for p in codex claude amp; do
 done
 # A reset, a normal interval, and a missing-data gap must not become a diagonal across time.
 sqlite3 "$CACHE/history.sqlite" "INSERT INTO samples VALUES($((NOW-600)),'claude','claude_five_hour',12,1799990000); INSERT INTO samples VALUES($((NOW-540)),'claude','claude_five_hour',96,1800000000); INSERT INTO samples VALUES($((NOW-480)),'claude','claude_five_hour',92,1800000000);"
+# Full history includes observations older than both former display windows,
+# but never extends beyond retention, even before collection prunes the DB.
+sqlite3 "$CACHE/history.sqlite" "INSERT INTO samples VALUES($((NOW-864000)),'codex','codex_604800',64,1799990000); INSERT INTO samples VALUES($((NOW-21600)),'claude','claude_five_hour',37,1799990000); INSERT INTO samples VALUES($((NOW-7862400)),'codex','codex_604800',3,1799990000);"
+sqlite3 "$CACHE/history.sqlite" "INSERT INTO samples VALUES($((NOW-863940)),'codex','codex_604800',67,1799990000); INSERT INTO samples VALUES($((NOW-863880)),'codex','codex_604800',62,1799990000); INSERT INTO samples VALUES($((NOW-863820)),'codex','codex_604800',65,1799990000);"
 "$ROOT/usage.sh" > "$TEMP/menu"
 head -1 "$TEMP/menu" | grep -q 'ChatGPT wk 83% (.*Claude 5h 0% (.* / wk 100% (.* / wk opus 69% (.*Amp agent 23% (~.* / orb 10% (~'
 grep -q '^ChatGPT | href=' "$TEMP/menu"
@@ -48,9 +52,12 @@ test "$(grep -c ' | href=' "$TEMP/menu")" = 3
 if grep -Eq 'image=|Refresh now|Last collection|History starts|90-day retention|Separate layout|time not supplied|↻|✕|color=black,white' "$TEMP/menu"; then exit 1; fi
 sed -n 's/.*nativechart=//p' "$TEMP/menu" | base64 -D > "$TEMP/chart.json"
 jq -e '.series | length == 6' "$TEMP/chart.json" >/dev/null
+jq -e '.series[] | select(.id == "claude_five_hour") | [.points[].reset] | index(1799990000) != null and index(1800000000) != null' "$TEMP/chart.json" >/dev/null
 jq -e '.series[] | select(.provider == "codex") | .label == "ChatGPT weekly"' "$TEMP/chart.json" >/dev/null
-jq -e '[.series[] | select(.id == "claude_five_hour") | .points[].segment] | unique | length == 3' "$TEMP/chart.json" >/dev/null
-jq -e '[.series[].span] | unique == [18000,604800]' "$TEMP/chart.json" >/dev/null
+jq -e '[.series[] | select(.id == "claude_five_hour") | .points[].segment] | unique | length == 4' "$TEMP/chart.json" >/dev/null
+jq -e --argjson earliest "$((NOW-864000))" '.now as $now | [.series[].span] | unique == [$now-$earliest]' "$TEMP/chart.json" >/dev/null
+jq -e '[.series[] | select(.provider == "codex") | .points[].remaining] | index(64) != null and index(65) != null and index(67) != null and index(62) != null and index(3) == null' "$TEMP/chart.json" >/dev/null
+jq -e '[.series[] | select(.id == "claude_five_hour") | .points[].remaining] | index(37) != null' "$TEMP/chart.json" >/dev/null
 # A first-run failure has no readings to show.
 cp "$CACHE/claude.json" "$TEMP/claude-good.json"
 printf '{"error":"HTTP 401 — sign in again", "limits":[],"balances":[]}' > "$CACHE/claude.json"

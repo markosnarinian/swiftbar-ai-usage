@@ -37,6 +37,22 @@ class ImportHistoryTest(unittest.TestCase):
             with sqlite3.connect(db_path) as db:
                 self.assertEqual(db.execute("SELECT at,remaining FROM samples ORDER BY at").fetchall(),
                                  [(now - 600, 82), (now - 300, 59)])
+            (root / "auth.json").write_text(json.dumps({"tokens": {"account_id": "current-test-account"}}))
+            def history(used):
+                return [{"name": "weekly", "windowMinutes": 10080, "entries": [
+                    {"capturedAt": dt.datetime.fromtimestamp(now - 100, dt.timezone.utc).isoformat(),
+                     "usedPercent": used, "resetsAt": None}]}]
+            bar = root / "codexbar.json"
+            bar.write_text(json.dumps({"version": 1, "accounts": {
+                "codex:v1:provider-account:other-test-account": history(91),
+                "codex:v1:provider-account:current-test-account": history(26)}}))
+            subprocess.run(command + ["--codexbar-history", str(bar)], check=True, capture_output=True)
+            subprocess.run(command + ["--codexbar-history", str(bar)], check=True, capture_output=True)
+            with sqlite3.connect(db_path) as db:
+                self.assertEqual(db.execute("SELECT at,remaining FROM samples ORDER BY at").fetchall(),
+                                 [(now - 600, 82), (now - 300, 59), (now - 100, 74)])
+            (root / "auth.json").write_text('{"tokens":{"account_id":"unmatched"}}')
+            self.assertNotEqual(subprocess.run(command + ["--codexbar-history", str(bar)], capture_output=True).returncode, 0)
 
 
 if __name__ == "__main__":

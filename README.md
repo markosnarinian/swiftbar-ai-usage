@@ -13,7 +13,7 @@ The preview uses invented readings, rendered by the actual native chart. It is n
 - One menu-bar line with full provider names, remaining percentages, and reset countdowns.
 - Every recognized usage window returned by each source; absent windows are not invented.
 - Readable, non-selectable information rows and clickable provider headings.
-- A 220 × 240-point native chart with hover readings, light/dark appearance, and local history.
+- A 220 × 240-point native remaining-usage chart with a solid observed line, dashed ideal pace, latest-reading dot, and no hover readout. Choose a limit and switch between its current period and retained history.
 - Refresh on opening, without blocking the menu, plus a one-minute timer. Claude network requests run at most every five minutes when healthy; rate limiting increases the delay and honors `Retry-After`.
 - Explicitly labeled cached readings during failures. Only successful observations enter the history.
 
@@ -84,7 +84,7 @@ Amp's renewal date has no exact time; its countdown is approximate and prefixed 
 
 Data stays in `~/.cache/swiftbar-usage` (SQLite history plus normalized responses and retry state). Provider response bodies are temporarily written there during collection; credential headers are passed to curl over stdin rather than command arguments or cache files. Files created by the collector use a restrictive umask. Requests go to the providers; there is no added analytics or upload service. Do not attach your real cache, auth files, or unredacted screenshots to issues.
 
-History retains 90 days of observed samples, but the compact chart displays a five-hour session axis and a seven-day weekly/monthly axis. It starts empty unless you import existing observations (below); it cannot reconstruct unrecorded usage. Gaps and resets break lines rather than interpolating invented usage. Monthly allowances use the seven-day history display, not a monthly time axis. With many enabled limits, the combined menu-bar title can exceed available screen space; the dropdown keeps its own compact width.
+History retains 90 days of observed samples. The chart defaults to the selected limit's current reset period, with an ideal pace from 100% at the period start to 0% at reset. The History tab shows its full retained history without an ideal-pace line. If reset timing is unavailable or expired, the chart falls back to recorded history without inventing a reset. Points keep isolated observations visible; gaps and resets break lines rather than interpolating invented usage. Dense data is reduced to per-bucket extrema for display. It starts empty unless you import existing observations (below); it cannot reconstruct unrecorded usage. With many enabled limits, the combined menu-bar title can exceed available screen space; the dropdown keeps its own compact width.
 
 ### Import earlier ChatGPT observations
 
@@ -95,6 +95,14 @@ python3 import_codex_history.py
 ```
 
 It reads only `token_count` rate-limit events from `sessions` and `archived_sessions` under `CODEX_HOME` (default `~/.codex`), imports observations within the 90-day retention period, ignores other named model limits, and preserves existing database samples. No conversation content is stored or uploaded. Re-running is safe. Missing observations stay missing. If you have switched accounts in this Codex profile, its older logs may belong to a different account; use `--codex-home` to select the appropriate profile. `--database` can target a separate SQLite file for inspection first.
+
+CodexBar may have recorded additional quota observations independently of the CLI logs. To import its supported account-scoped history too:
+
+```sh
+python3 import_codex_history.py --codexbar-history "$HOME/Library/Application Support/com.steipete.codexbar/history/codex.json"
+```
+
+This reads only the bucket matching the current `tokens.account_id` in Codex's `auth.json`. Other accounts and unscoped history are not imported. It converts recorded percent-used to percent-remaining; it does not import estimated token costs as quota readings, change CodexBar's files, or upload history.
 
 ## Development and checks
 

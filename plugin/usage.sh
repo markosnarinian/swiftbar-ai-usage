@@ -130,14 +130,16 @@ done
 [[ ${#files[@]} -gt 0 ]] || { printf 'Usage\n---\nNo services enabled\n'; exit; }
 
 chart() {
-  local p id label span points
+  local p id label span points oldest range
+  oldest=$(sqlite3 "$DB" "SELECT min(at) FROM samples WHERE at BETWEEN $((NOW-7776000)) AND $NOW;")
+  range=$((NOW - ${oldest:-$NOW}))
+  (( range >= 60 )) || range=60
   local series='[]'
   for p in $SELECTED; do
     while IFS=$'\t' read -r id label span; do
       [[ $id =~ ^[a-z0-9_]+$ ]] || continue
-      local range=604800 gap=180
+      local gap=180
       [[ $p != claude ]] || gap=420
-      (( span > 18000 )) || range=18000
       # Preserve outages, resets, and extrema while bounding points per time bucket.
       points=$(sqlite3 -json "$DB" "WITH previous AS (
         SELECT at, remaining, reset, lag(at) OVER (ORDER BY at) AS prev_at,
@@ -148,11 +150,13 @@ chart() {
           OVER (ORDER BY at) AS segment FROM previous
       ), ranked AS (
         SELECT *, row_number() OVER (PARTITION BY segment, (at-$NOW+$range)*200/$range ORDER BY remaining,at) AS low,
-          row_number() OVER (PARTITION BY segment, (at-$NOW+$range)*200/$range ORDER BY remaining DESC,at DESC) AS high
+          row_number() OVER (PARTITION BY segment, (at-$NOW+$range)*200/$range ORDER BY remaining DESC,at DESC) AS high,
+          row_number() OVER (PARTITION BY segment, (at-$NOW+$range)*200/$range ORDER BY at) AS first,
+          row_number() OVER (PARTITION BY segment, (at-$NOW+$range)*200/$range ORDER BY at DESC) AS last
         FROM segments
-      ) SELECT at,remaining,segment FROM ranked WHERE low=1 OR high=1 ORDER BY at;")
-      series=$(jq -c --arg id "$id" --arg label "$label" --arg provider "$p" --argjson span "$range" --argjson points "${points:-[]}" \
-        '. + [{id:$id,label:$label,provider:$provider,span:$span,points:$points}]' <<< "$series")
+      ) SELECT at,remaining,reset,segment FROM ranked WHERE low=1 OR high=1 OR first=1 OR last=1 ORDER BY at;")
+      series=$(jq -c --arg id "$id" --arg label "$label" --arg provider "$p" --argjson span "$range" --argjson window "$span" --argjson points "${points:-[]}" \
+        '. + [{id:$id,label:$label,provider:$provider,span:$span,window:$window,points:$points}]' <<< "$series")
     done < <(jq -r '.limits[] | [.id,(.label | sub("^Codex "; "ChatGPT ")),.window] | @tsv' "$CACHE/$p.json")
   done
   local payload
