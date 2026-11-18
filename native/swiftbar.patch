@@ -1,0 +1,345 @@
+diff --git a/SwiftBar.xcodeproj/project.pbxproj b/SwiftBar.xcodeproj/project.pbxproj
+index 4ea154e..3c33c3a 100644
+--- a/SwiftBar.xcodeproj/project.pbxproj
++++ b/SwiftBar.xcodeproj/project.pbxproj
+@@ -7,6 +7,7 @@
+ 	objects = {
+ 
+ /* Begin PBXBuildFile section */
++		AABBCC110000000000000001 /* NativeUsageChart.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABBCC110000000000000002 /* NativeUsageChart.swift */; };
+ 		3920747E25460FD000213DBE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3920747D25460FD000213DBE /* AppDelegate.swift */; };
+ 		3920748225460FD300213DBE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3920748125460FD300213DBE /* Assets.xcassets */; };
+ 		3920748525460FD300213DBE /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3920748425460FD300213DBE /* Preview Assets.xcassets */; };
+@@ -158,6 +159,7 @@
+ 		39E1549E2569A2D700287D8A /* ImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageView.swift; sourceTree = "<group>"; };
+ 		ABF91B7C2589C7920020590A /* NSFont+Offset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSFont+Offset.swift"; sourceTree = "<group>"; };
+ 		CC467001000000000000A101 /* MenuItemNode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuItemNode.swift; sourceTree = "<group>"; };
++		AABBCC110000000000000002 /* NativeUsageChart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeUsageChart.swift; sourceTree = "<group>"; };
+ 		CC467004000000000000A104 /* MenuDiff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuDiff.swift; sourceTree = "<group>"; };
+ 		CC467007000000000000A107 /* FoldableMenuItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoldableMenuItemView.swift; sourceTree = "<group>"; };
+ 		CC468000000000000000C000 /* PackagedPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackagedPlugin.swift; sourceTree = "<group>"; };
+@@ -343,6 +345,7 @@
+ 		398B86D4254DC01800DEA027 /* MenuBar */ = {
+ 			isa = PBXGroup;
+ 			children = (
++				AABBCC110000000000000002 /* NativeUsageChart.swift */,
+ 				CC467007000000000000A107 /* FoldableMenuItemView.swift */,
+ 				39AF777B254618F6001D76E5 /* MenuBarItem.swift */,
+ 				CC467004000000000000A104 /* MenuDiff.swift */,
+@@ -675,6 +678,7 @@
+ 				CC468001000000000000C001 /* PackagedPlugin.swift in Sources */,
+ 				FAA14A192728C7FC0052FDB8 /* AppDelegate+Intents.swift in Sources */,
+ 				39AF778D2548EBA3001D76E5 /* MenuLineParameters.swift in Sources */,
++				AABBCC110000000000000001 /* NativeUsageChart.swift in Sources */,
+ 				CC467002000000000000A102 /* MenuItemNode.swift in Sources */,
+ 				CC467005000000000000A105 /* MenuDiff.swift in Sources */,
+ 				CC467008000000000000A108 /* FoldableMenuItemView.swift in Sources */,
+diff --git a/SwiftBar/MenuBar/MenuBarItem.swift b/SwiftBar/MenuBar/MenuBarItem.swift
+index 500f349..446f2c8 100644
+--- a/SwiftBar/MenuBar/MenuBarItem.swift
++++ b/SwiftBar/MenuBar/MenuBarItem.swift
+@@ -1292,6 +1292,28 @@ extension MenubarItem {
+         params: MenuLineParameters,
+         presentation: MenuImagePresentation? = nil
+     ) {
++        if params.params["textonly"] == "true" {
++            item.view = MainActor.assumeIsolated {
++                NativeUsageChartHost.makeTextView(title: title.string, size: CGFloat(params.size ?? 13))
++            }
++            item.image = nil
++            item.attributedTitle = nil
++            item.title = ""
++            item.setAccessibilityLabel(title.string)
++            return
++        }
++        if let encoded = params.params["nativechart"] {
++            // Menu construction already runs on AppKit's main thread.
++            item.view = MainActor.assumeIsolated { NativeUsageChartHost.makeView(encoded: encoded) }
++            item.image = nil
++            item.attributedTitle = nil
++            item.title = ""
++            item.setAccessibilityLabel(title.string)
++            return
++        }
++        if ["nativeUsageChart", "nativeInfoRow"].contains(item.view?.identifier?.rawValue ?? "") {
++            item.view = nil
++        }
+         let resolvedPresentation: MenuImagePresentation = if let presentation {
+             presentation
+         } else if #available(macOS 26.0, *) {
+@@ -1985,8 +2007,26 @@ extension MenubarItem {
+             refreshAndShowMenu()
+             return
+         }
+-        barItem.menu = statusBarMenu
+-        barItem.button?.performClick(nil)
++        presentMenu()
++    }
++
++    private var hasNativeUsageChart: Bool {
++        statusBarMenu.items.contains { $0.view?.identifier?.rawValue == "nativeUsageChart" }
++    }
++
++    private func presentMenu() {
++        if hasNativeUsageChart, let button = barItem.button {
++            // An attached status-item menu is forced to the title's width by
++            // AppKit. A positioned popup keeps the native content's own width.
++            barItem.menu = nil
++            button.highlight(true)
++            defer { button.highlight(false) }
++            let belowButton = button.isFlipped ? button.bounds.maxY + 6 : button.bounds.minY - 6
++            statusBarMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: belowButton), in: button)
++        } else {
++            barItem.menu = statusBarMenu
++            barItem.button?.performClick(nil)
++        }
+     }
+ 
+     func refreshAndShowMenu() {
+@@ -2009,8 +2049,7 @@ extension MenubarItem {
+         {
+             timerPlugin.enableTimer()
+         }
+-        barItem.menu = statusBarMenu
+-        barItem.button?.performClick(nil)
++        presentMenu()
+     }
+ 
+     /// Attaches the status bar menu directly to the status item whenever
+@@ -2025,7 +2064,7 @@ extension MenubarItem {
+     /// those keep the `barItemClicked`/`showMenu` path.
+     func syncMenuAttachment() {
+         guard !isOpen else { return }
+-        let attach = Self.shouldAttachMenuToBarItem(
++        let attach = !hasNativeUsageChart && Self.shouldAttachMenuToBarItem(
+             titleHasAction: !Self.actionKinds(for: MenuLineParameters(line: currentTitleLine)).isEmpty,
+             refreshesOnOpen: refreshOnOpen && plugin?.type == .Executable
+         )
+diff --git a/SwiftBarTests/SwiftBarTests.swift b/SwiftBarTests/SwiftBarTests.swift
+index f51f98e..646b120 100644
+--- a/SwiftBarTests/SwiftBarTests.swift
++++ b/SwiftBarTests/SwiftBarTests.swift
+@@ -2595,6 +2595,29 @@ struct MenubarItemIncrementalUpdateTests {
+         }
+     }
+ 
++    @MainActor @Test func testNativeChartLivesInMenuAndUpdatesToPlainRow() throws {
++        let item = makeMenuBarItem()
++        let encoded = Data(#"{"now":1000,"series":[{"id":"claude","label":"Claude 5h","provider":"claude","span":18000,"points":[{"at":900,"remaining":37,"segment":1}]}]}"#.utf8).base64EncodedString()
++        item._updateMenu(content: "Title\n---\nRemaining | nativechart=\(encoded)")
++        let row = try #require(item.statusBarMenu.items.first { $0.view?.identifier?.rawValue == "nativeUsageChart" })
++        #expect(row.view?.frame.size == NSSize(width: 220, height: 240))
++        #expect(row.image == nil)
++        // Attached menus inherit the status title width, even with fixed views.
++        #expect(item.barItem.menu == nil)
++        item._updateMenu(content: "Title\n---\nA long informational message that must wrap instead of widening the entire menu | textonly=true")
++        let info = try #require(item.statusBarMenu.items.first { $0.view?.identifier?.rawValue == "nativeInfoRow" })
++        #expect(info.view?.frame.width == 220)
++        #expect((info.view?.frame.height ?? 0) > 30)
++        #expect(info.action == nil)
++        #expect(info.title.isEmpty)
++        item._updateMenu(content: "Title\n---\nRemaining | color=black,white")
++        #expect(item.statusBarMenu.items.allSatisfy { $0.view == nil })
++        let plain = try #require(item.statusBarMenu.items.first { $0.attributedTitle?.string.trimmingCharacters(in: .whitespaces) == "Remaining" })
++        #expect(plain.action != nil)
++        #expect(item.barItem.menu === item.statusBarMenu)
++        #expect(NativeUsageChartData.decode("invalid") == nil)
++    }
++
+     @MainActor @Test func testIncrementalUpdate_excludesHiddenBodyRowsFromMenuDiff() throws {
+         let item = makeMenuBarItem()
+ 
+diff --git a/SwiftBar/MenuBar/NativeUsageChart.swift b/SwiftBar/MenuBar/NativeUsageChart.swift
+new file mode 100644
+index 0000000..84d8ab7
+--- /dev/null
++++ b/SwiftBar/MenuBar/NativeUsageChart.swift
+@@ -0,0 +1,188 @@
++import AppKit
++import Charts
++import SwiftUI
++
++/// Inline, base64-encoded JSON supplied by a plugin's `nativechart` parameter.
++/// The host renders data only: it never reads credentials, files, or URLs.
++struct NativeUsageChartData: Decodable {
++    struct Point: Decodable {
++        let at: Double
++        let remaining: Double
++        let segment: Int
++    }
++
++    struct Series: Decodable, Identifiable {
++        let id: String
++        let label: String
++        let provider: String
++        let span: Double
++        let points: [Point]
++
++        var shortLabel: String {
++            label.replacingOccurrences(of: "weekly", with: "wk")
++                .replacingOccurrences(of: " (monthly)", with: "")
++        }
++    }
++
++    let now: Double
++    let series: [Series]
++
++    static func decode(_ encoded: String) -> Self? {
++        guard let data = Data(base64Encoded: encoded),
++              let decoded = try? JSONDecoder().decode(Self.self, from: data),
++              decoded.series.allSatisfy({ $0.span > 0 && $0.points.allSatisfy { (0...100).contains($0.remaining) } })
++        else { return nil }
++        return decoded
++    }
++}
++
++@available(macOS 13.0, *)
++struct NativeUsageChart: View {
++    let data: NativeUsageChartData
++    @State private var hovered: String?
++
++    private func color(_ series: NativeUsageChartData.Series) -> Color {
++        switch series.provider {
++        case "codex": return .blue
++        case "claude": return .orange
++        default: return .purple
++        }
++    }
++
++    private func dash(_ series: NativeUsageChartData.Series) -> [CGFloat] {
++        if series.span <= 18000 { return [] }
++        return series.id == "amp_orb" ? [1, 2] : [4, 2]
++    }
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: 6) {
++            Text(hovered ?? "Remaining · %")
++                .font(.system(size: 10, weight: .medium))
++                .lineLimit(1)
++                .frame(height: 13, alignment: .leading)
++
++            HStack {
++                Text("7d")
++                Spacer()
++                Text("3.5d")
++                Spacer()
++                Text("Now")
++            }
++            .font(.system(size: 9))
++            .padding(.leading, 24)
++
++            Chart {
++                ForEach(data.series) { series in
++                    ForEach(Array(series.points.enumerated()), id: \.offset) { _, point in
++                        LineMark(
++                            x: .value("History", (point.at - data.now) / series.span),
++                            y: .value("Remaining", point.remaining),
++                            series: .value("Segment", "\(series.id)-\(point.segment)")
++                        )
++                        .foregroundStyle(color(series))
++                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: dash(series)))
++                    }
++                    if let point = series.points.last {
++                        PointMark(
++                            x: .value("History", (point.at - data.now) / series.span),
++                            y: .value("Remaining", point.remaining)
++                        )
++                        .foregroundStyle(color(series))
++                        .symbolSize(10)
++                    }
++                }
++            }
++            .chartXScale(domain: -1.0...0.025)
++            .chartYScale(domain: -2.0...102.0)
++            .chartYAxis {
++                AxisMarks(position: .leading, values: [0, 50, 100]) {
++                    AxisGridLine()
++                    AxisValueLabel().font(.system(size: 9))
++                }
++            }
++            .chartXAxis(.hidden)
++            .chartLegend(.hidden)
++            .chartOverlay { proxy in
++                GeometryReader { geometry in
++                    Rectangle().fill(.clear).contentShape(Rectangle())
++                        .onContinuousHover { phase in
++                            switch phase {
++                            case let .active(location):
++                                let origin = geometry[proxy.plotAreaFrame].origin
++                                guard let x: Double = proxy.value(atX: location.x - origin.x),
++                                      let y: Double = proxy.value(atY: location.y - origin.y)
++                                else { hovered = nil; return }
++                                let candidates = data.series.flatMap { series in
++                                    series.points.map { point in
++                                        (series, point, abs((point.at-data.now)/series.span-x)*100 + abs(point.remaining-y))
++                                    }
++                                }
++                                if let (series, point, _) = candidates.min(by: { $0.2 < $1.2 }) {
++                                    let date = Date(timeIntervalSince1970: point.at)
++                                    hovered = "\(series.shortLabel) \(Int(point.remaining.rounded()))% · \(date.formatted(.dateTime.day().month().hour().minute()))"
++                                }
++                            case .ended: hovered = nil
++                            }
++                        }
++                }
++            }
++            .accessibilityLabel("Usage remaining. Session limits use the lower five-hour axis; weekly and monthly limits use the upper seven-day axis.")
++
++            HStack {
++                Text("5h")
++                Spacer()
++                Text("2.5h")
++                Spacer()
++                Text("Now")
++            }
++            .font(.system(size: 9))
++            .padding(.leading, 24)
++
++            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 3) {
++                ForEach(data.series) { series in
++                    HStack(spacing: 4) {
++                        Path { path in
++                            path.move(to: .init(x: 0, y: 4))
++                            path.addLine(to: .init(x: 12, y: 4))
++                        }
++                        .stroke(color(series), style: StrokeStyle(lineWidth: 1.5, dash: dash(series)))
++                        .frame(width: 12, height: 8)
++                        Text(series.shortLabel).font(.system(size: 9)).lineLimit(1)
++                    }
++                    .help(series.label + (series.span <= 18000 ? " · lower 5h axis" : " · upper 7d axis"))
++                }
++            }
++            if data.series.isEmpty {
++                Text("No current readings").font(.caption)
++            }
++        }
++        .foregroundStyle(.primary)
++        .padding(10)
++        .frame(width: 220, height: 240)
++    }
++}
++
++enum NativeUsageChartHost {
++    @MainActor static func makeTextView(title: String, size: CGFloat) -> NSView {
++        let view = NSHostingView(rootView:
++            Text(title.trimmingCharacters(in: .whitespaces))
++                .font(.system(size: size))
++                .foregroundStyle(.primary)
++                .frame(width: 200, alignment: .leading)
++                .fixedSize(horizontal: false, vertical: true)
++                .padding(.horizontal, 10)
++                .padding(.vertical, 2)
++        )
++        view.identifier = NSUserInterfaceItemIdentifier("nativeInfoRow")
++        view.setFrameSize(view.fittingSize)
++        return view
++    }
++
++    @MainActor static func makeView(encoded: String) -> NSView? {
++        guard #available(macOS 13.0, *), let data = NativeUsageChartData.decode(encoded) else { return nil }
++        let view = NSHostingView(rootView: NativeUsageChart(data: data))
++        view.identifier = NSUserInterfaceItemIdentifier("nativeUsageChart")
++        view.frame = NSRect(x: 0, y: 0, width: 220, height: 240)
++        return view
++    }
++}
