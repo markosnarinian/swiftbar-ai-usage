@@ -151,10 +151,10 @@ index f51f98e..646b120 100644
  
 diff --git a/SwiftBar/MenuBar/NativeUsageChart.swift b/SwiftBar/MenuBar/NativeUsageChart.swift
 new file mode 100644
-index 0000000..89bb5e6
+index 0000000..e6aeff2
 --- /dev/null
 +++ b/SwiftBar/MenuBar/NativeUsageChart.swift
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,158 @@
 +import AppKit
 +import Charts
 +import SwiftUI
@@ -193,7 +193,6 @@ index 0000000..89bb5e6
 +@available(macOS 13.0, *)
 +struct NativeUsageChart: View {
 +    let data: NativeUsageChartData
-+    @State var fullHistory = false
 +    @SwiftUI.Environment(\.colorScheme) private var colorScheme
 +
 +    private func color(_ series: NativeUsageChartData.Series) -> Color {
@@ -208,16 +207,6 @@ index 0000000..89bb5e6
 +    }
 +
 +    var body: some View {
-+        let starts = data.series.map { series in
-+            if !fullHistory, let reset = series.points.last?.reset,
-+                let window = series.window, window > 0, reset > data.now
-+            {
-+                return reset - window
-+            }
-+            return data.now - series.span
-+        }
-+        let start = starts.min() ?? data.now - 60
-+        let end = data.now
 +        VStack(alignment: .leading, spacing: 10) {
 +            HStack(spacing: 10) {
 +                ForEach(["codex", "claude", "amp"], id: \.self) { provider in
@@ -228,86 +217,66 @@ index 0000000..89bb5e6
 +                }
 +            }
 +            .font(.caption)
-+            Picker("Range", selection: $fullHistory) {
-+                Text("Current period").tag(false)
-+                Text("History").tag(true)
-+            }
-+            .labelsHidden()
-+            .pickerStyle(.segmented)
-+            .controlSize(.small)
 +
 +            if !data.series.isEmpty {
 +                Chart {
-+                    if !fullHistory {
-+                        ForEach([0.0, 1.0], id: \.self) { progress in
-+                            LineMark(
-+                                x: .value("Time", progress),
-+                                y: .value("Remaining", 100 * (1 - progress)),
-+                                series: .value("Series", "Projection")
-+                            )
-+                            .foregroundStyle(Color.secondary)
-+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 3]))
-+                            .accessibilityLabel("Linear projection from 100% to 0% at reset")
-+                        }
++                    ForEach([0.0, 1.0], id: \.self) { progress in
++                        LineMark(
++                            x: .value("Time", progress),
++                            y: .value("Remaining", 100 * (1 - progress)),
++                            series: .value("Series", "Projection")
++                        )
++                        .foregroundStyle(Color.secondary)
++                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 3]))
++                        .accessibilityLabel("Linear projection from 100% to 0% at reset")
 +                    }
-+                    ForEach(Array(data.series.enumerated()), id: \.element.id) { index, series in
-+                        let reset = series.points.last?.reset
-+                        let hasPeriod = reset != nil && (series.window ?? 0) > 0 && reset! > data.now
-+                        let points = series.points.filter {
-+                            $0.at >= starts[index] && $0.at <= end && (fullHistory || (hasPeriod && $0.reset == reset))
-+                        }
-+                        ForEach(Array(points.enumerated()), id: \.offset) { _, point in
-+                            LineMark(
-+                                x: .value("Time", fullHistory ? point.at : (point.at - starts[index]) / series.window!),
-+                                y: .value("Remaining", point.remaining),
-+                                series: .value("Series", series.id)
-+                            )
-+                            .foregroundStyle(color(series))
-+                            .lineStyle(
-+                                StrokeStyle(
-+                                    lineWidth: 1, lineCap: .round,
-+                                    dash: series.window == 18000 ? [0, 3] : [])
-+                            )
-+                            .interpolationMethod(.linear)
-+                            .accessibilityLabel(series.label)
++                    ForEach(data.series) { series in
++                        if let reset = series.points.last?.reset, let window = series.window,
++                            window > 0, reset > data.now
++                        {
++                            let start = reset - window
++                            let points = series.points.filter {
++                                $0.at >= start && $0.at <= data.now && $0.reset == reset
++                            }
++                            ForEach(Array(points.enumerated()), id: \.offset) { _, point in
++                                LineMark(
++                                    x: .value("Time", (point.at - start) / window),
++                                    y: .value("Remaining", point.remaining),
++                                    series: .value("Series", series.id)
++                                )
++                                .foregroundStyle(color(series))
++                                .lineStyle(
++                                    StrokeStyle(
++                                        lineWidth: 1, lineCap: .round,
++                                        dash: series.window == 18000 ? [0, 3] : [])
++                                )
++                                .interpolationMethod(.linear)
++                                .accessibilityLabel(series.label)
++                            }
 +                        }
 +                    }
 +                }
-+                .chartXScale(domain: fullHistory ? start...end : 0...1)
++                .chartXScale(domain: 0...1)
 +                .chartYScale(domain: 0...100)
 +                .chartYAxis { AxisMarks(values: [0, 50, 100]) }
 +                .chartXAxis(.hidden)
 +                .chartLegend(.hidden)
-+                .frame(height: 110)
++                .frame(height: 135)
 +                .accessibilityLabel("All providers, usage remaining")
 +
 +                HStack {
-+                    if fullHistory {
-+                        VStack(alignment: .leading, spacing: 2) {
-+                            Text(Date(timeIntervalSince1970: start), format: .dateTime.month().day())
-+                            Text(Date(timeIntervalSince1970: start), format: .dateTime.hour().minute())
-+                        }
-+                        Spacer()
-+                        VStack(alignment: .trailing, spacing: 2) {
-+                            Text(Date(timeIntervalSince1970: end), format: .dateTime.month().day())
-+                            Text(Date(timeIntervalSince1970: end), format: .dateTime.hour().minute())
-+                        }
-+                    } else {
-+                        Text("Cycle start")
-+                        Spacer()
-+                        Text("Reset")
-+                    }
++                    Text("Cycle start")
++                    Spacer()
++                    Text("Reset")
 +                }
 +                .font(.caption2)
 +                .foregroundStyle(.secondary)
 +                Text("Solid: wk / other · Dotted: 5hr")
 +                    .font(.caption2)
 +                    .foregroundStyle(.secondary)
-+                if !fullHistory {
-+                    Text("Dashed: linear projection")
-+                        .font(.caption2)
-+                        .foregroundStyle(.secondary)
-+                }
++                Text("Dashed: linear projection")
++                    .font(.caption2)
++                    .foregroundStyle(.secondary)
 +            } else {
 +                Text("No current readings").font(.caption)
 +            }
