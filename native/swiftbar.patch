@@ -151,10 +151,10 @@ index f51f98e..646b120 100644
  
 diff --git a/SwiftBar/MenuBar/NativeUsageChart.swift b/SwiftBar/MenuBar/NativeUsageChart.swift
 new file mode 100644
-index 0000000..8a4f689
+index 0000000..89bb5e6
 --- /dev/null
 +++ b/SwiftBar/MenuBar/NativeUsageChart.swift
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,189 @@
 +import AppKit
 +import Charts
 +import SwiftUI
@@ -183,8 +183,8 @@ index 0000000..8a4f689
 +
 +    static func decode(_ encoded: String) -> Self? {
 +        guard let data = Data(base64Encoded: encoded),
-+              let decoded = try? JSONDecoder().decode(Self.self, from: data),
-+              decoded.series.allSatisfy({ $0.span > 0 && $0.points.allSatisfy { (0...100).contains($0.remaining) } })
++            let decoded = try? JSONDecoder().decode(Self.self, from: data),
++            decoded.series.allSatisfy({ $0.span > 0 && $0.points.allSatisfy { (0...100).contains($0.remaining) } })
 +        else { return nil }
 +        return decoded
 +    }
@@ -193,28 +193,41 @@ index 0000000..8a4f689
 +@available(macOS 13.0, *)
 +struct NativeUsageChart: View {
 +    let data: NativeUsageChartData
-+    @State private var selectedID: String?
-+    @State private var fullHistory = false
++    @State var fullHistory = false
++    @SwiftUI.Environment(\.colorScheme) private var colorScheme
 +
 +    private func color(_ series: NativeUsageChartData.Series) -> Color {
 +        switch series.provider {
 +        case "codex": return .blue
 +        case "claude": return .orange
-+        default: return .purple
++        default:
++            return colorScheme == .dark
++                ? Color(red: 0.35, green: 0.90, blue: 0.65)
++                : Color(red: 0.0, green: 0.45, blue: 0.28)
 +        }
 +    }
 +
 +    var body: some View {
-+        let selected = data.series.first(where: { $0.id == selectedID }) ?? data.series.first
-+        VStack(alignment: .leading, spacing: 10) {
-+            Picker("Limit", selection: Binding(
-+                get: { selected?.id ?? "" }, set: { selectedID = $0 }
-+            )) {
-+                ForEach(data.series) { Text($0.label).tag($0.id) }
++        let starts = data.series.map { series in
++            if !fullHistory, let reset = series.points.last?.reset,
++                let window = series.window, window > 0, reset > data.now
++            {
++                return reset - window
 +            }
-+            .labelsHidden()
-+            .controlSize(.small)
-+
++            return data.now - series.span
++        }
++        let start = starts.min() ?? data.now - 60
++        let end = data.now
++        VStack(alignment: .leading, spacing: 10) {
++            HStack(spacing: 10) {
++                ForEach(["codex", "claude", "amp"], id: \.self) { provider in
++                    if let series = data.series.first(where: { $0.provider == provider }) {
++                        Text(provider == "codex" ? "ChatGPT" : provider == "claude" ? "Claude" : "Amp")
++                            .foregroundStyle(color(series))
++                    }
++                }
++            }
++            .font(.caption)
 +            Picker("Range", selection: $fullHistory) {
 +                Text("Current period").tag(false)
 +                Text("History").tag(true)
@@ -223,80 +236,77 @@ index 0000000..8a4f689
 +            .pickerStyle(.segmented)
 +            .controlSize(.small)
 +
-+            if let series = selected {
-+                let reset = series.points.last?.reset
-+                let hasPeriod = reset != nil && (series.window ?? 0) > 0 && reset! > data.now
-+                let end = !fullHistory && hasPeriod ? reset! : data.now
-+                let start = !fullHistory && hasPeriod ? end - series.window! : data.now - series.span
-+                let points = series.points.filter {
-+                    $0.at >= start && $0.at <= end && (fullHistory || !hasPeriod || $0.reset == reset)
-+                }
-+                let counts = Dictionary(grouping: points, by: \.segment).mapValues(\.count)
++            if !data.series.isEmpty {
 +                Chart {
-+                    if !fullHistory && hasPeriod {
-+                        ForEach([start, end], id: \.self) { at in
++                    if !fullHistory {
++                        ForEach([0.0, 1.0], id: \.self) { progress in
 +                            LineMark(
-+                                x: .value("Time", Date(timeIntervalSince1970: at)),
-+                                y: .value("Remaining", at == start ? 100.0 : 0.0),
-+                                series: .value("Series", "Ideal")
++                                x: .value("Time", progress),
++                                y: .value("Remaining", 100 * (1 - progress)),
++                                series: .value("Series", "Projection")
 +                            )
-+                            .foregroundStyle(Color(nsColor: .secondaryLabelColor))
-+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
++                            .foregroundStyle(Color.secondary)
++                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 3]))
++                            .accessibilityLabel("Linear projection from 100% to 0% at reset")
 +                        }
 +                    }
-+                    ForEach(Array(points.enumerated()), id: \.offset) { _, point in
-+                        LineMark(
-+                            x: .value("Time", Date(timeIntervalSince1970: point.at)),
-+                            y: .value("Remaining", point.remaining),
-+                            series: .value("Series", "Observed-\(point.segment)")
-+                        )
-+                        .foregroundStyle(color(series))
-+                        .lineStyle(StrokeStyle(lineWidth: 1))
-+                        if counts[point.segment] == 1 && point.at != points.last?.at {
-+                            PointMark(
-+                                x: .value("Time", Date(timeIntervalSince1970: point.at)),
-+                                y: .value("Remaining", point.remaining)
++                    ForEach(Array(data.series.enumerated()), id: \.element.id) { index, series in
++                        let reset = series.points.last?.reset
++                        let hasPeriod = reset != nil && (series.window ?? 0) > 0 && reset! > data.now
++                        let points = series.points.filter {
++                            $0.at >= starts[index] && $0.at <= end && (fullHistory || (hasPeriod && $0.reset == reset))
++                        }
++                        ForEach(Array(points.enumerated()), id: \.offset) { _, point in
++                            LineMark(
++                                x: .value("Time", fullHistory ? point.at : (point.at - starts[index]) / series.window!),
++                                y: .value("Remaining", point.remaining),
++                                series: .value("Series", series.id)
 +                            )
 +                            .foregroundStyle(color(series))
-+                            .symbolSize(10)
++                            .lineStyle(
++                                StrokeStyle(
++                                    lineWidth: 1, lineCap: .round,
++                                    dash: series.window == 18000 ? [0, 3] : [])
++                            )
++                            .interpolationMethod(.linear)
++                            .accessibilityLabel(series.label)
 +                        }
 +                    }
-+                    if let point = points.last {
-+                        PointMark(
-+                            x: .value("Time", Date(timeIntervalSince1970: point.at)),
-+                            y: .value("Remaining", point.remaining)
-+                        )
-+                        .foregroundStyle(color(series))
-+                        .symbolSize(35)
-+                    }
 +                }
-+                .chartXScale(domain: Date(timeIntervalSince1970: start)...Date(timeIntervalSince1970: end))
++                .chartXScale(domain: fullHistory ? start...end : 0...1)
 +                .chartYScale(domain: 0...100)
 +                .chartYAxis { AxisMarks(values: [0, 50, 100]) }
 +                .chartXAxis(.hidden)
 +                .chartLegend(.hidden)
 +                .frame(height: 110)
-+                .accessibilityLabel("\(series.label), usage remaining")
++                .accessibilityLabel("All providers, usage remaining")
 +
 +                HStack {
-+                    VStack(alignment: .leading, spacing: 2) {
-+                        Text(Date(timeIntervalSince1970: start), format: .dateTime.month().day())
-+                        Text(Date(timeIntervalSince1970: start), format: .dateTime.hour().minute())
-+                    }
-+                    Spacer()
-+                    VStack(alignment: .trailing, spacing: 2) {
-+                        Text(Date(timeIntervalSince1970: end), format: .dateTime.month().day())
-+                        Text(Date(timeIntervalSince1970: end), format: .dateTime.hour().minute())
++                    if fullHistory {
++                        VStack(alignment: .leading, spacing: 2) {
++                            Text(Date(timeIntervalSince1970: start), format: .dateTime.month().day())
++                            Text(Date(timeIntervalSince1970: start), format: .dateTime.hour().minute())
++                        }
++                        Spacer()
++                        VStack(alignment: .trailing, spacing: 2) {
++                            Text(Date(timeIntervalSince1970: end), format: .dateTime.month().day())
++                            Text(Date(timeIntervalSince1970: end), format: .dateTime.hour().minute())
++                        }
++                    } else {
++                        Text("Cycle start")
++                        Spacer()
++                        Text("Reset")
 +                    }
 +                }
 +                .font(.caption2)
 +                .foregroundStyle(.secondary)
-+                if let latest = points.last {
-+                    Text("\(Int(latest.remaining.rounded()))% remaining")
-+                        .font(.caption)
++                Text("Solid: wk / other · Dotted: 5hr")
++                    .font(.caption2)
++                    .foregroundStyle(.secondary)
++                if !fullHistory {
++                    Text("Dashed: linear projection")
++                        .font(.caption2)
 +                        .foregroundStyle(.secondary)
-+                } else {
-+                    Text("No recorded readings").font(.caption)
 +                }
 +            } else {
 +                Text("No current readings").font(.caption)
@@ -311,8 +321,9 @@ index 0000000..8a4f689
 +
 +enum NativeUsageChartHost {
 +    @MainActor static func makeTextView(title: String, size: CGFloat) -> NSView {
-+        let view = NSHostingView(rootView:
-+            Text(title.trimmingCharacters(in: .whitespaces))
++        let view = NSHostingView(
++            rootView:
++                Text(title.trimmingCharacters(in: .whitespaces))
 +                .font(.system(size: size))
 +                .foregroundStyle(.primary)
 +                .frame(width: 200, alignment: .leading)

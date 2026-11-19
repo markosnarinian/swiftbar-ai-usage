@@ -13,6 +13,22 @@ if $provider == "codex" then
    | limit("codex_" + ($span | tostring); "ChatGPT " + (if $span == 18000 then "5h" elif $span == 604800 then "weekly" else ($span / 3600 | tostring) + "h" end);
            100 - .used_percent; $span; .reset_at)] as $limits
   | {limits: $limits, balances: []}
+elif $provider == "claude-web" then
+  .[0] as $payload | $payload.usage as $usage
+  | (["primary", "secondary", "tertiary"] | map(. as $key | $usage[$key]
+      | select(. != null and .isSyntheticPlaceholder != true)
+      | ($payload.rateWindowLabels[$key] // "model") as $label
+      | (if $key == "primary" then "five_hour"
+         elif $key == "secondary" then "seven_day"
+         else "seven_day_" + ($label | ascii_downcase | gsub("[^a-z0-9]+"; "_")) end) as $id
+      | limit("claude_" + $id;
+          (if $key == "primary" then "Claude 5h" elif $key == "secondary" then "Claude weekly" else "Claude weekly " + $label end);
+          100 - .usedPercent; (.windowMinutes * 60); .resetsAt)))
+    + [$usage.extraRateWindows[]? | select(.usageKnown != false and .window.isSyntheticPlaceholder != true)
+       | . as $extra | .window
+       | limit("claude_" + ($extra.id | ascii_downcase | gsub("[^a-z0-9]+"; "_")); "Claude " + $extra.title;
+           100 - .usedPercent; (.windowMinutes * 60); .resetsAt)] as $limits
+  | {limits:$limits, balances:[], observedAt:($usage.updatedAt | epoch), source:"web"}
 elif $provider == "claude" then
   [to_entries[] | select(.key | test("^(five_hour|seven_day.*)$"))
    | select(.value != null and (.value.utilization | type) == "number")

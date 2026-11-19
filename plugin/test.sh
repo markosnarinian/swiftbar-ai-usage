@@ -95,7 +95,7 @@ export -f security curl
 count=$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')
 echo 0 > "$CACHE/claude.retry"; echo 0 > "$CACHE/updated"
 "$ROOT/usage.sh" > "$TEMP/rate-menu"
-head -1 "$TEMP/rate-menu" | grep -q 'Claude cached 5h 0%'
+head -1 "$TEMP/rate-menu" | grep -q 'Claude stale 5h 0%'
 jq -e '.error != null and (.limits | length == 3)' "$CACHE/claude.json" >/dev/null
 test "$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')" = "$count"
 test "$(cat "$CACHE/claude.retry")" -ge "$((NOW+900))"
@@ -117,4 +117,89 @@ calls=$(wc -l < "$HOME/curl-calls")
 echo 0 > "$CACHE/updated"
 "$ROOT/usage.sh" > /dev/null
 test "$(wc -l < "$HOME/curl-calls")" = "$calls"
+# Opening bypasses the minute cache, but not provider cooldowns. Mock the
+# refresh URL so no installed app is contacted by this offline test.
+open() { printf '%s\n' "$*" >> "$HOME/refresh-calls"; }
+export -f open
+wait_for_refresh() {
+  local attempt
+  for attempt in {1..100}; do
+    [[ ! -f $HOME/refresh-calls ]] || return 0
+    sleep 0.05
+  done
+  echo 'FAIL: menu-open collector did not publish' >&2
+  return 1
+}
+echo 0 > "$CACHE/claude.retry"
+date +%s > "$CACHE/updated"
+SWIFTBAR_PLUGIN_REFRESH_REASON=MenuOpen "$ROOT/usage.sh" > "$TEMP/open-menu"
+wait_for_refresh
+test "$(wc -l < "$HOME/curl-calls")" -eq "$((calls+1))"
+grep -q 'swiftbar://refreshplugin?name=usage.1m.sh' "$HOME/refresh-calls"
+rm "$HOME/refresh-calls"
+SWIFTBAR_PLUGIN_REFRESH_REASON=MenuOpen "$ROOT/usage.sh" > /dev/null
+wait_for_refresh
+test "$(wc -l < "$HOME/curl-calls")" -eq "$((calls+1))"
+# A concurrent open must leave the existing collector and its refresh alone.
+rm "$HOME/refresh-calls"
+mkdir "$CACHE/lock"; echo $$ > "$CACHE/lock/pid"
+"$ROOT/usage.sh" collect
+test ! -f "$HOME/refresh-calls"
+test "$(wc -l < "$HOME/curl-calls")" -eq "$((calls+1))"
+rm -rf "$CACHE/lock"
+# Failed refreshes retain the last successful observation, labeled stale.
+MOCK_HTTP_STATUS=429
+echo 0 > "$CACHE/claude.retry"; echo 0 > "$CACHE/updated"
+"$ROOT/usage.sh" > "$TEMP/stale-menu"
+grep -q '^Stale reading · ' "$TEMP/stale-menu"
+if grep -qi cached "$TEMP/stale-menu"; then exit 1; fi
+# The opt-in website source stays live during an OAuth cooldown, verifies the
+# account, and stores the website's observation time rather than inventing one.
+printf 'SERVICES="claude"\nCLAUDE_SOURCE=web\n' > "$HOME/.config/swiftbar-usage/config"
+printf '{"oauthAccount":{"emailAddress":"test@example.com","organizationName":"Personal"}}' > "$HOME/.claude.json"
+jq -n --arg at "$(date -u -r "$((NOW-10))" '+%Y-%m-%dT%H:%M:%SZ')" '[{
+  provider:"claude",source:"web",rateWindowLabels:{tertiary:"Sonnet"},usage:{
+    accountEmail:"TEST@example.com",accountOrganization:"Personal",updatedAt:$at,
+    primary:{usedPercent:7,windowMinutes:300,resetsAt:"2027-01-15T08:00:00Z"},
+    secondary:{usedPercent:38,windowMinutes:10080,resetsAt:null},
+    tertiary:{usedPercent:19,windowMinutes:10080,resetsAt:null},
+    extraRateWindows:[{id:"weekly-opus",title:"Weekly Opus",window:{usedPercent:31,windowMinutes:10080,resetsAt:null}},
+      {id:"unknown",title:"Unknown",usageKnown:false,window:{usedPercent:100,windowMinutes:10080}}]
+  }}]' > "$HOME/web-good.json"
+cp "$HOME/web-good.json" "$HOME/web-response.json"
+codexbar() {
+  [[ $* == 'usage --provider claude --source web --format json --no-credits --web-timeout 20' ]] || return 99
+  echo called >> "$HOME/web-calls"
+  cat "$HOME/web-response.json"
+  return "${MOCK_WEB_EXIT:-0}"
+}
+export -f codexbar
+calls=$(wc -l < "$HOME/curl-calls")
+oauth_retry=$(cat "$CACHE/claude.retry")
+"$ROOT/usage.sh" collect
+jq -e --argjson at "$((NOW-10))" '.source == "web" and .observedAt == $at and .error == null and [.limits[].remaining] == [93,62,81,69]' "$CACHE/claude.json" >/dev/null
+test "$(sqlite3 "$CACHE/history.sqlite" "SELECT remaining FROM samples WHERE provider='claude' AND id='claude_five_hour' AND at=$((NOW-10));")" = 93.0
+"$ROOT/usage.sh" collect
+test "$(wc -l < "$HOME/web-calls")" -eq 2
+test "$(wc -l < "$HOME/curl-calls")" = "$calls"
+test "$(cat "$CACHE/claude.retry")" = "$oauth_retry"
+count=$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')
+for mutation in '.[0].usage.accountEmail = "other@example.com"' '.[0].usage.accountOrganization = "Other"' '.[0].source = "codexbar-app"' '.[0].usage.updatedAt = "2020-01-01T00:00:00Z"' '.[0].usage.primary.usedPercent = "invalid"'; do
+  jq "$mutation" "$HOME/web-good.json" > "$HOME/web-response.json"
+  rm -f "$CACHE/claude-web.retry"
+  "$ROOT/usage.sh" collect
+  jq -e '.error != null and .limits[0].remaining == 93' "$CACHE/claude.json" >/dev/null
+  test "$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')" = "$count"
+done
+cp "$HOME/web-good.json" "$HOME/web-response.json"
+export MOCK_WEB_EXIT=1
+rm -f "$CACHE/claude-web.retry"
+"$ROOT/usage.sh" collect
+jq -e '.error != null and .limits[0].remaining == 93' "$CACHE/claude.json" >/dev/null
+test "$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')" = "$count"
+calls=$(wc -l < "$HOME/web-calls")
+"$ROOT/usage.sh" collect
+test "$(wc -l < "$HOME/web-calls")" = "$calls"
+test ! -e "$CACHE/claude-web.raw"
+test ! -e "$CACHE/claude.json.tmp"
 printf 'PASS: all limits/resets in combined title, full names, native chart data, reset/gap segments, readable rows, hidden controls, error state, retention and backoff\n'

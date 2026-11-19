@@ -13,9 +13,9 @@ The preview uses invented readings, rendered by the actual native chart. It is n
 - One menu-bar line with full provider names, remaining percentages, and reset countdowns.
 - Every recognized usage window returned by each source; absent windows are not invented.
 - Readable, non-selectable information rows and clickable provider headings.
-- A 220 × 240-point native remaining-usage chart with a solid observed line, dashed ideal pace, latest-reading dot, and no hover readout. Choose a limit and switch between its current period and retained history.
-- Refresh on opening, without blocking the menu, plus a one-minute timer. Claude network requests run at most every five minutes when healthy; rate limiting increases the delay and honors `Retry-After`.
-- Explicitly labeled cached readings during failures. Only successful observations enter the history.
+- A 220 × 240-point native remaining-usage chart overlaying every limit: blue for ChatGPT, orange for Claude, adaptive green for Amp; solid weekly/other limits and dotted five-hour limits. Lines stay thin, without point markers or hover readouts. Current periods align each limit's own cycle start and reset on a shared 0–100% elapsed-time axis, with one gray dashed linear projection from 100% remaining to 0% at reset. Actual readings stop at their observed cycle progress; they are not extrapolated. History retains its calendar-time axis. Limits without a known active reset window appear only in History.
+- Refresh on opening, without blocking the menu, plus a one-minute timer. Opening bypasses the minute cache: existing readings appear immediately, then the open dropdown updates when collection finishes. Claude's default OAuth source runs at most every five minutes when healthy and honors rate-limit backoff. The opt-in website source runs on the minute timer and on opening, independently of the OAuth cooldown.
+- Explicitly labeled stale readings during failures. Only successful observations enter the history.
 
 ## Requirements
 
@@ -27,6 +27,16 @@ The preview uses invented readings, rendered by the actual native chart. It is n
   - **Amp:** the `amp` CLI installed and signed in; `amp usage` must work.
 
 API-key-only accounts and alternative credential storage formats are not supported. The plugin reads credentials; it never refreshes or exports them. Sign in again using the respective CLI when authentication expires.
+
+### Claude website source
+
+If Claude's OAuth usage endpoint keeps returning 429, the website source can provide fresh readings without reducing the refresh cadence. It requires the [CodexBar CLI](https://github.com/steipete/CodexBar) (tested with 0.84.0) and a signed-in claude.ai session accessible to CodexBar. Enable it explicitly in `~/.config/swiftbar-usage/config`:
+
+```sh
+CLAUDE_SOURCE=web
+```
+
+The plugin runs `codexbar usage --provider claude --source web --format json --no-credits --web-timeout 20`. CodexBar handles browser authentication; SwiftBar does not extract or store cookies. Results must match the email and organization in the local `~/.claude.json` Claude Code profile. Cached CodexBar results, mismatched accounts, and readings over two minutes old are rejected. The source-reported timestamp is kept in history; errors preserve previous readings as stale and retry no sooner than the next minute. The website can still impose its own rate limits or require sign-in again; this is not a guarantee of unlimited requests. Set `CLAUDE_SOURCE=oauth` to revert. OAuth retry deadlines are preserved when switching sources, and no Claude Code status-line configuration is changed.
 
 ## Build and install
 
@@ -75,16 +85,16 @@ Uninstall removes the entrypoint and runtime scripts, but preserves configuratio
 | Display name | Source | Scope |
 | --- | --- | --- |
 | ChatGPT | `chatgpt.com/backend-api/wham/usage`, authenticated with the local Codex login | The Codex-related subscription windows this endpoint reports, **not all ChatGPT chat/model limits** |
-| Claude | `api.anthropic.com/api/oauth/usage`, authenticated with the local Claude Code login | Recognized five-hour, weekly, and model-specific weekly windows |
+| Claude | Default: `api.anthropic.com/api/oauth/usage` using Claude Code login. Opt-in website source: CodexBar CLI using the signed-in claude.ai session | Recognized five-hour, weekly, and model-specific windows exposed by the selected source |
 | Amp | `amp usage` CLI output | Reported agent/orb allowances and individual/workspace credit balances |
 
-These interfaces and CLI output formats may change without notice. Claude HTTP 429 means the **usage check** was throttled, not necessarily that your allowance is exhausted. The plugin retains known readings as cached and retries later. A first-run failure has no previous reading to show.
+These interfaces and CLI output formats may change without notice. Claude HTTP 429 means the **usage check** was throttled, not necessarily that your allowance is exhausted. The plugin retains known readings, labels them stale, and retries later. A first-run failure has no previous reading to show.
 
 Amp's renewal date has no exact time; its countdown is approximate and prefixed with `~`. A reset marked `due` is not evidence that a new allowance has been fetched.
 
 Data stays in `~/.cache/swiftbar-usage` (SQLite history plus normalized responses and retry state). Provider response bodies are temporarily written there during collection; credential headers are passed to curl over stdin rather than command arguments or cache files. Files created by the collector use a restrictive umask. Requests go to the providers; there is no added analytics or upload service. Do not attach your real cache, auth files, or unredacted screenshots to issues.
 
-History retains 90 days of observed samples. The chart defaults to the selected limit's current reset period, with an ideal pace from 100% at the period start to 0% at reset. The History tab shows its full retained history without an ideal-pace line. If reset timing is unavailable or expired, the chart falls back to recorded history without inventing a reset. Points keep isolated observations visible; gaps and resets break lines rather than interpolating invented usage. Dense data is reduced to per-bucket extrema for display. It starts empty unless you import existing observations (below); it cannot reconstruct unrecorded usage. With many enabled limits, the combined menu-bar title can exceed available screen space; the dropdown keeps its own compact width.
+History retains 90 days of observed samples. The chart defaults to all limits' current reset periods, aligned by elapsed cycle progress, with one shared linear projection from 100% at cycle start to 0% at reset. The History tab shows all limits' retained observations on a calendar-time axis without a projection. Limits with unavailable or expired reset timing remain visible in History but are omitted from the current-period chart rather than assigned an invented cycle. Consecutive readings are connected by straight lines, including across observation gaps and resets in History; these connecting sections are visual interpolation, not recorded measurements. No point markers are drawn, so a single reading has no visible line until a second reading arrives. Dense data is reduced to per-bucket extrema for display. It starts empty unless you import existing observations (below); it cannot reconstruct unrecorded usage. With many enabled limits, the combined menu-bar title can exceed available screen space; the dropdown keeps its own compact width.
 
 ### Import earlier ChatGPT observations
 

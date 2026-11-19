@@ -8,6 +8,7 @@ CACHE="$HOME/.cache/swiftbar-usage"
 CONFIG="$HOME/.config/swiftbar-usage/config"
 mkdir -p "$CACHE"
 SERVICES="codex claude amp"
+CLAUDE_SOURCE=oauth
 # shellcheck source=/dev/null
 source "$CONFIG"
 SELF="$ROOT/usage.sh"
@@ -70,14 +71,49 @@ fetch_http() {
   rm -f "$CACHE/$provider.raw" "$CACHE/$provider.json.tmp"
 }
 
+fetch_claude_web() {
+  local pid watchdog result
+  command -v codexbar >/dev/null || { error claude 'Browser usage requires the CodexBar CLI'; return; }
+  codexbar usage --provider claude --source web --format json --no-credits --web-timeout 20 > "$CACHE/claude-web.raw" 2>/dev/null & pid=$!
+  (sleep 30; kill "$pid" 2>/dev/null) </dev/null >/dev/null 2>&1 & watchdog=$!
+  wait "$pid"; result=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  # Do not mix browser accounts into the existing Claude Code history, or
+  # treat a CodexBar cache fallback as a fresh website observation.
+  if (( result != 0 )); then
+    error claude 'Claude website unavailable — check browser sign-in in CodexBar'
+  elif ! jq -e --slurpfile identity "$HOME/.claude.json" '
+      length == 1 and .[0].provider == "claude" and .[0].source == "web" and .[0].error == null
+      and ($identity[0].oauthAccount.emailAddress | type == "string" and length > 0)
+      and ((.[0].usage.accountEmail | ascii_downcase) == ($identity[0].oauthAccount.emailAddress | ascii_downcase))
+      and (.[0].usage.accountOrganization == $identity[0].oauthAccount.organizationName)
+    ' "$CACHE/claude-web.raw" >/dev/null 2>&1; then
+    error claude 'Browser usage account could not be matched to Claude Code — check sign-ins'
+  elif jq -e --arg provider claude-web -f "$ROOT/normalize.jq" "$CACHE/claude-web.raw" |
+      jq -e --argjson now "$NOW" 'select(.observedAt >= $now - 120 and .observedAt <= $now + 30)' > "$CACHE/claude.json.tmp"; then
+    mv "$CACHE/claude.json.tmp" "$CACHE/claude.json"
+    rm -f "$CACHE/claude-web.retry" "$CACHE/claude-web.raw"
+    return
+  else
+    error claude 'Claude website returned stale or unrecognized usage'
+  fi
+  # Keep the minute cadence; repeated menu opens must not hammer a failed login.
+  echo $((NOW + 60)) > "$CACHE/claude-web.retry"
+  rm -f "$CACHE/claude-web.raw" "$CACHE/claude.json.tmp"
+}
+
 collect() {
   sqlite3 "$DB" 'PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS samples (at INTEGER, provider TEXT, id TEXT, remaining REAL, reset INTEGER, PRIMARY KEY(at,provider,id));' >/dev/null
   local p retry pid
   for p in $SERVICES; do
     case $p in codex|claude|amp) ;; *) continue ;; esac
-    retry=$(cat "$CACHE/$p.retry" 2>/dev/null || echo 0)
+    local retry_source=$p
+    [[ $p != claude || $CLAUDE_SOURCE != web ]] || retry_source=claude-web
+    retry=$(cat "$CACHE/$retry_source.retry" 2>/dev/null || echo 0)
     if (( NOW < retry )); then continue; fi
-    if [[ $p != amp ]]; then fetch_http "$p"
+    if [[ $p == claude && $CLAUDE_SOURCE == web ]]; then fetch_claude_web
+    elif [[ $p != amp ]]; then fetch_http "$p"
     else
       # Bound the CLI call, including a hung network request.
       amp usage > "$CACHE/amp.raw" 2>/dev/null & pid=$!
@@ -90,7 +126,7 @@ collect() {
       rm -f "$CACHE/amp.raw" "$CACHE/amp.json.tmp"
     fi
     # IDs are constrained locally; SQL never receives labels or remote text.
-    jq -r --arg p "$p" --argjson at "$NOW" 'select(.error == null) | .limits[] | select(.id | test("^[a-z0-9_]+$")) | "INSERT OR REPLACE INTO samples VALUES(\($at),\u0027\($p)\u0027,\u0027\(.id)\u0027,\(.remaining),\(.reset // "NULL"));"' "$CACHE/$p.json" | sqlite3 "$DB"
+    jq -r --arg p "$p" --argjson at "$NOW" 'select(.error == null) | (.observedAt // $at) as $observed | .limits[] | select(.id | test("^[a-z0-9_]+$")) | "INSERT OR REPLACE INTO samples VALUES(\($observed),\u0027\($p)\u0027,\u0027\(.id)\u0027,\(.remaining),\(.reset // "NULL"));"' "$CACHE/$p.json" | sqlite3 "$DB"
   done
   sqlite3 "$DB" "DELETE FROM samples WHERE at < $((NOW - 7776000)); PRAGMA incremental_vacuum;" >/dev/null
   echo "$NOW" > "$CACHE/updated"
@@ -102,12 +138,14 @@ if [[ ${SWIFTBAR_PLUGIN_REFRESH_REASON:-} == MenuOpen && $MODE == menu ]]; then
   MODE=preview
 fi
 
+collected=false
 if [[ $MODE != preview ]]; then
   last=$(cat "$CACHE/updated" 2>/dev/null || echo 0)
-  if (( NOW - last >= 55 )) && mkdir "$CACHE/lock" 2>/dev/null; then
+  if { [[ $MODE == collect ]] || (( NOW - last >= 55 )); } && mkdir "$CACHE/lock" 2>/dev/null; then
     trap 'rm -rf "$CACHE/lock"; rm -f "$CACHE/"*.raw' EXIT
     echo $$ > "$CACHE/lock/pid"
     collect
+    collected=true
     rm -f "$CACHE/"*.raw
     rm -rf "$CACHE/lock"
     trap - EXIT
@@ -116,7 +154,9 @@ if [[ $MODE != preview ]]; then
   fi
 fi
 if [[ $MODE == collect ]]; then
-  open -g 'swiftbar://refreshplugin?name=usage.1m.sh'
+  # The collector holding the lock will publish its result; competing opens
+  # must not trigger another render/collection while it is still running.
+  if $collected; then open -g 'swiftbar://refreshplugin?name=usage.1m.sh'; fi
   exit
 fi
 
@@ -183,7 +223,7 @@ for p in $SELECTED; do
     label=${label#"$name "}; label=${label/ (monthly)/}; label=${label/weekly/wk}
     values+="${values:+ / }$label $remaining% ($(countdown "$reset" "$p"))"
   done < <(jq -r '.limits[] | [(.label | sub("^Codex "; "ChatGPT ")),(.remaining|round),(.reset // "unknown")] | @tsv' "$CACHE/$p.json")
-  if [[ -n $values ]] && jq -e '.error != null' "$CACHE/$p.json" >/dev/null; then values="cached $values"; fi
+  if [[ -n $values ]] && jq -e '.error != null' "$CACHE/$p.json" >/dev/null; then values="stale $values"; fi
   if [[ -z $values ]] || (( NOW-last>180 )); then values='unavailable'; fi
   title+="${title:+  ·  }$name $values"
 done
@@ -194,7 +234,7 @@ for p in $SELECTED; do
   if (( NOW - last > 180 )); then printf 'Waiting for updated readings | textonly=true\n'; fi
   jq -r 'select(.error) | .error + " | textonly=true size=11"' "$CACHE/$p.json"
   if jq -e '.error != null and .observedAt != null' "$CACHE/$p.json" >/dev/null; then
-    printf 'Cached reading · %s | textonly=true size=11\n' "$(date -r "$(jq -r '.observedAt' "$CACHE/$p.json")" '+%d %b %H:%M')"
+    printf 'Stale reading · %s | textonly=true size=11\n' "$(date -r "$(jq -r '.observedAt' "$CACHE/$p.json")" '+%d %b %H:%M')"
   fi
   while IFS=$'\t' read -r label remaining reset span; do
     label=${label#"$name "}
