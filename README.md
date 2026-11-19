@@ -90,6 +90,8 @@ Uninstall removes the entrypoint and runtime scripts, but preserves configuratio
 
 These interfaces and CLI output formats may change without notice. Claude HTTP 429 means the **usage check** was throttled, not necessarily that your allowance is exhausted. The plugin retains known readings, labels them stale, and retries later. A first-run failure has no previous reading to show.
 
+Direct HTTP collection retries transient DNS, connection, timeout, and interrupted-transfer failures once after one second, with a ten-second limit per attempt. Persistent failures retain stale readings and report the transport failure rather than an invalid “HTTP 000” status. Authentication, certificate-verification, and rate-limit errors are not immediately retried; provider cooldowns still apply. Refresh-on-open and the minute interval are unchanged.
+
 Amp's renewal date has no exact time; its countdown is approximate and prefixed with `~`. A reset marked `due` is not evidence that a new allowance has been fetched.
 
 Data stays in `~/.cache/swiftbar-usage` (SQLite history plus normalized responses and retry state). Provider response bodies are temporarily written there during collection; credential headers are passed to curl over stdin rather than command arguments or cache files. Files created by the collector use a restrictive umask. Requests go to the providers; there is no added analytics or upload service. Do not attach your real cache, auth files, or unredacted screenshots to issues.

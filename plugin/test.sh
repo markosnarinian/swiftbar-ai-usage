@@ -202,4 +202,58 @@ calls=$(wc -l < "$HOME/web-calls")
 test "$(wc -l < "$HOME/web-calls")" = "$calls"
 test ! -e "$CACHE/claude-web.raw"
 test ! -e "$CACHE/claude.json.tmp"
+# Transient transport failures recover inside a refresh. Persistent failures,
+# including a partial HTTP 200, must preserve stale data rather than enter history.
+printf 'SERVICES="codex"\n' > "$HOME/.config/swiftbar-usage/config"
+export CODEX_HOME="$HOME/.codex"
+mkdir -p "$CODEX_HOME"
+printf '{"tokens":{"access_token":"test-only","account_id":"test-account"}}' > "$CODEX_HOME/auth.json"
+export MOCK_CURL_EXIT=28 MOCK_RECOVER=1 MOCK_HTTP_STATUS=000
+curl() {
+  cat >/dev/null
+  echo called >> "$HOME/transport-calls"
+  local result=$MOCK_CURL_EXIT status=$MOCK_HTTP_STATUS
+  if [[ $MOCK_RECOVER == 1 && $(wc -l < "$HOME/transport-calls") -gt 1 ]]; then result=0; status=200; fi
+  while (( $# )); do
+    case $1 in
+      -D) printf 'HTTP/2 %s\r\n\r\n' "$status" > "$2"; shift;;
+      -o) printf '{"rate_limit":{"primary_window":{"used_percent":29,"limit_window_seconds":604800,"reset_at":1800000000}}}' > "$2"; shift;;
+    esac
+    shift
+  done
+  printf '%s' "$status"
+  return "$result"
+}
+export -f curl
+rm -f "$CACHE/codex.retry"
+"$ROOT/usage.sh" collect
+test "$(wc -l < "$HOME/transport-calls")" -eq 2
+jq -e '.error == null and .limits[0].remaining == 71' "$CACHE/codex.json" >/dev/null
+count=$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')
+# Make a stale timestamp distinct from this refresh to detect accidental updates.
+jq --argjson at "$((NOW-120))" '.observedAt = $at' "$CACHE/codex.json" > "$CACHE/codex.tmp"
+mv "$CACHE/codex.tmp" "$CACHE/codex.json"
+MOCK_RECOVER=0
+for code in 6 28 18 60; do
+  MOCK_CURL_EXIT=$code
+  MOCK_HTTP_STATUS=000
+  [[ $code != 18 ]] || MOCK_HTTP_STATUS=200
+  : > "$HOME/transport-calls"
+  "$ROOT/usage.sh" collect
+  expected=2; [[ $code != 60 ]] || expected=1
+  test "$(wc -l < "$HOME/transport-calls")" -eq "$expected"
+  jq -e --argjson at "$((NOW-120))" '.error != null and (.error | contains("HTTP 000") | not) and .observedAt == $at and .limits[0].remaining == 71' "$CACHE/codex.json" >/dev/null
+  test "$(sqlite3 "$CACHE/history.sqlite" 'SELECT count(*) FROM samples;')" = "$count"
+  test ! -e "$CACHE/codex.raw"
+  test ! -e "$CACHE/codex.headers"
+done
+# Authentication and rate-limit responses are not transport retries.
+MOCK_CURL_EXIT=0
+for status in 401 429; do
+  MOCK_HTTP_STATUS=$status
+  : > "$HOME/transport-calls"
+  "$ROOT/usage.sh" collect
+  test "$(wc -l < "$HOME/transport-calls")" -eq 1
+  jq -e '.error != null and .limits[0].remaining == 71' "$CACHE/codex.json" >/dev/null
+done
 printf 'PASS: all limits/resets in combined title, full names, native chart data, reset/gap segments, readable rows, hidden controls, error state, retention and backoff\n'

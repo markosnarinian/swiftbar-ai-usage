@@ -28,7 +28,7 @@ error() {
 }
 
 fetch_http() {
-  local provider=$1 token account status url delay retry_after retry_at
+  local provider=$1 token account status url delay retry_after retry_at attempt result reason
   if [[ $provider == codex ]]; then
     token=$(jq -er '.tokens.access_token // empty' "${CODEX_HOME:-$HOME/.codex}/auth.json" 2>/dev/null) || { error codex 'Login unavailable — run codex login'; return; }
     account=$(jq -r '.tokens.account_id // empty' "${CODEX_HOME:-$HOME/.codex}/auth.json")
@@ -39,12 +39,37 @@ fetch_http() {
     url=https://api.anthropic.com/api/oauth/usage
   fi
   # Headers go through stdin, not process arguments or temporary files.
-  status=$({
-    printf '%s' "$token" | jq -Rs '"header = " + (("Authorization: Bearer " + .) | @json)' -r
-    if [[ -n $account ]]; then printf '%s' "$account" | jq -Rs '"header = " + (("ChatGPT-Account-Id: " + .) | @json)' -r; fi
-    printf 'header = "anthropic-beta: oauth-2025-04-20"\n'
-  } | curl --config - --silent --show-error --connect-timeout 5 --max-time 20 \
+  # One bounded retry absorbs transient DNS/connection/transfer failures while
+  # keeping the total transport budget near the original 20-second timeout.
+  for attempt in 1 2; do
+    rm -f "$CACHE/$provider.headers" "$CACHE/$provider.raw"
+    status=$({
+      printf '%s' "$token" | jq -Rs '"header = " + (("Authorization: Bearer " + .) | @json)' -r
+      if [[ -n $account ]]; then printf '%s' "$account" | jq -Rs '"header = " + (("ChatGPT-Account-Id: " + .) | @json)' -r; fi
+      printf 'header = "anthropic-beta: oauth-2025-04-20"\n'
+    } | curl --config - --silent --show-error --connect-timeout 5 --max-time 10 \
         -H 'Accept: application/json' -A 'SwiftBar-Usage' -D "$CACHE/$provider.headers" -o "$CACHE/$provider.raw" -w '%{http_code}' "$url" 2>/dev/null)
+    result=$?
+    case $result in
+      5|6|7|18|28|35|52|55|56|92)
+        if (( attempt == 1 )); then sleep 1; continue; fi ;;
+    esac
+    break
+  done
+  if (( result != 0 )); then
+    case $result in
+      5|6) reason='DNS lookup failed' ;;
+      7) reason='Connection failed' ;;
+      28) reason='Request timed out' ;;
+      35) reason='TLS connection failed' ;;
+      60) reason='TLS certificate verification failed' ;;
+      18|52|55|56|92) reason='Connection interrupted' ;;
+      *) reason="Network request failed (curl $result)" ;;
+    esac
+    rm -f "$CACHE/$provider.headers" "$CACHE/$provider.raw"
+    error "$provider" "$reason — automatic retry next refresh"
+    return
+  fi
   retry_after=$(awk 'tolower($1)=="retry-after:" {$1=""; sub(/^ /, ""); sub(/\r$/, ""); print}' "$CACHE/$provider.headers" 2>/dev/null | tail -1)
   rm -f "$CACHE/$provider.headers"
   case $status in
